@@ -29,6 +29,7 @@ class Rekordbox2Traktor:
         self.cue_index = 0
         self.track_info = {}
         self.tracks = []
+        self.track_id_map = {}  # Maps Rekordbox TrackID to NML file path
 
     def generate_audio_id(self):
         # AUDIO_ID contains Base64-encoded audio fingerprint data (spectral analysis, transients, beat info) that Traktor uses for validation.
@@ -37,25 +38,40 @@ class Rekordbox2Traktor:
         return "AWAWZmRENDMzMzf//////////////////////f/////////////////////s/////////////////////5b///7//////////+//////af/////////////////////+///////////f/////////1n/////////9Y///////////f/////////+r/7///////9XYzMzM0MyMzJUMzNDNDMzRDn//////////////////////f/////////////////////e/////////////////////3r+/+////////7u7u/v////vf//7////////v/+//////+FZneYYQAAAA=="
 
     def set_track_info(self, track):
+        # Helper function to safely convert to float with default
+        def safe_float(value, default=0.0):
+            try:
+                return float(value) if value else default
+            except (ValueError, TypeError):
+                return default
+        
+        # Helper function to safely get attribute with default
+        def safe_get_attr(attr_name, default=""):
+            val = get_attribute(track, attr_name)
+            return val if val else default
+        
+        avg_bpm = safe_get_attr("AverageBpm", "120.0")
+        bitrate = safe_get_attr("BitRate", "320")
+        
         self.track_info = {
             'id': get_attribute(track, "TrackId") or uuid.uuid4().hex[:8],
-            'title': get_attribute(track, "Name"),
-            'artist': get_attribute(track, "Artist"),
-            'album': get_attribute(track, "Album"),
-            'key': get_tonalikey(get_attribute(track, "Tonality")),
-            'bpm': float(get_attribute(track, "AverageBpm") or "120.0"),
-            'color': get_track_color(get_attribute(track, "Colour")),
-            'genre': get_attribute(track, "Genre"),
-            'playtime': get_attribute(track, "TotalTime"),
-            'playcount': get_attribute(track, "PlayCount"),
-            'bitrate': float(get_attribute(track, "BitRate") or "320") * 1000,
-            'import_date': format_date(get_attribute(track, "DateAdded")),
-            'modif_date': format_date(get_attribute(track, "DateModified")),
-            'last_played': format_date(get_attribute(track, "LastPlayed")),
-            'ranking': get_attribute(track, "Rating"),
-            'filesize': get_attribute(track, "Size"),
-            'location': get_attribute(track, "Location"),
-            'comments': get_attribute(track, "Comments")
+            'title': safe_get_attr("Name"),
+            'artist': safe_get_attr("Artist"),
+            'album': safe_get_attr("Album"),
+            'key': get_tonalikey(safe_get_attr("Tonality")),
+            'bpm': safe_float(avg_bpm, 120.0),
+            'color': get_track_color(safe_get_attr("Colour")),
+            'genre': safe_get_attr("Genre"),
+            'playtime': safe_get_attr("TotalTime", "0"),
+            'playcount': safe_get_attr("PlayCount", "0"),
+            'bitrate': safe_float(bitrate, 320.0) * 1000,
+            'import_date': format_date(safe_get_attr("DateAdded")),
+            'modif_date': format_date(safe_get_attr("DateModified")),
+            'last_played': format_date(safe_get_attr("LastPlayed")),
+            'ranking': safe_get_attr("Rating", "0"),
+            'filesize': safe_get_attr("Size", "0"),
+            'location': safe_get_attr("Location"),
+            'comments': safe_get_attr("Comments")
         }
 
         return self.track_info
@@ -84,19 +100,29 @@ class Rekordbox2Traktor:
         return modif
 
     def add_info(self):
+        # Handle empty playtime with default value
+        playtime = self.track_info['playtime'] or "0"
+        try:
+            playtime_float = float(playtime)
+        except (ValueError, TypeError):
+            playtime_float = 0.0
+        
+        # Handle missing key with safe lookup
+        key_code = KEY_TO_CODE.get(self.track_info['key'], "10d")  # Default to C major
+        
         info_attrs = {
             "BITRATE": str(int(self.track_info['bitrate'])),
-            "GENRE": self.track_info['genre'],
-            "KEY": KEY_TO_CODE[self.track_info['key']],
-            "PLAYCOUNT": self.track_info['playcount'],
-            "PLAYTIME": self.track_info['playtime'],
-            "PLAYTIME_FLOAT": f"{float(self.track_info['playtime']):.6f}",
-            "RANKING": self.track_info['ranking'],
-            "IMPORT_DATE": self.track_info['import_date'],
-            "LAST_PLAYED": self.track_info['last_played'],
+            "GENRE": self.track_info['genre'] or "",
+            "KEY": key_code,
+            "PLAYCOUNT": self.track_info['playcount'] or "0",
+            "PLAYTIME": playtime,
+            "PLAYTIME_FLOAT": f"{playtime_float:.6f}",
+            "RANKING": self.track_info['ranking'] or "0",
+            "IMPORT_DATE": self.track_info['import_date'] or "",
+            "LAST_PLAYED": self.track_info['last_played'] or "",
             "FLAGS": "12",
             # "FILESIZE": str(int(float(self.track_info['filesize']) / 1024)) if self.track_info['filesize'] else "0",
-            "COLOR": self.track_info['color']
+            "COLOR": self.track_info['color'] or ""
         }
 
         if self.track_info['comments']:
@@ -244,19 +270,109 @@ class Rekordbox2Traktor:
         )
         return entry
 
-    def add_playlist(self, name="collection"):
+    def add_playlists_section(self):
+        """Create the PLAYLISTS section structure."""
         playlists = ET.SubElement(self.root, "PLAYLISTS")
         root_node = ET.SubElement(playlists, "NODE", TYPE="FOLDER", NAME="$ROOT")
-        subnodes = ET.SubElement(root_node, "SUBNODES", COUNT="1")
+        return root_node
 
-        playlist_node = ET.SubElement(subnodes, "NODE", TYPE="PLAYLIST", NAME=name)
+    def process_playlist_node(self, rekordbox_node, parent_subnodes):
+        """
+        Recursively process a Rekordbox playlist node (folder or playlist).
+        
+        Args:
+            rekordbox_node: Rekordbox NODE element
+            parent_subnodes: Parent NML SUBNODES element (or NODE element if it needs SUBNODES created)
+        """
+        node_type = get_attribute(rekordbox_node, "Type")
+        node_name = get_attribute(rekordbox_node, "Name")
+        
+        if not node_name:
+            return
+        
+        if node_type == "0":  # Folder
+            # Create a folder node in NML
+            folder_node = ET.SubElement(parent_subnodes, "NODE", TYPE="FOLDER", NAME=node_name)
+            subnodes = ET.SubElement(folder_node, "SUBNODES")
+            
+            # Process child nodes
+            child_count = 0
+            for child in rekordbox_node.findall("NODE"):
+                self.process_playlist_node(child, subnodes)
+                child_count += 1
+            
+            subnodes.set("COUNT", str(child_count))
+            
+        elif node_type == "1":  # Playlist
+            # Get all TRACK elements from the Rekordbox playlist
+            track_elements = rekordbox_node.findall("TRACK")
+            
+            if not track_elements:
+                return
+            
+            # Create playlist node in NML
+            playlist_node = ET.SubElement(parent_subnodes, "NODE", TYPE="PLAYLIST", NAME=node_name)
+            playlist = ET.SubElement(
+                playlist_node, "PLAYLIST",
+                ENTRIES=str(len(track_elements)),
+                TYPE="LIST",
+                UUID=uuid.uuid4().hex
+            )
+            
+            # Add tracks to playlist by mapping TrackID to file path
+            for track_elem in track_elements:
+                track_id = get_attribute(track_elem, "Key")
+                if track_id and track_id in self.track_id_map:
+                    file_path = self.track_id_map[track_id]
+                    entry = ET.SubElement(playlist, "ENTRY")
+                    primary_key = ET.SubElement(entry, "PRIMARYKEY", TYPE="TRACK", KEY=file_path)
+
+    def process_playlists(self, rekordbox_root):
+        """
+        Process all playlists from Rekordbox XML and convert to NML format.
+        
+        Args:
+            rekordbox_root: Rekordbox XML root element
+        """
+        # Find PLAYLISTS section in Rekordbox XML
+        playlists_section = rekordbox_root.find("PLAYLISTS")
+        
+        if playlists_section is None:
+            # No playlists found, create a default collection playlist
+            self.add_default_playlist()
+            return
+        
+        # Create NML PLAYLISTS structure
+        nml_root_node = self.add_playlists_section()
+        subnodes = ET.SubElement(nml_root_node, "SUBNODES")
+        
+        # Find ROOT node in Rekordbox playlists
+        root_node = playlists_section.find("NODE")
+        if root_node is not None:
+            # Process all child nodes of ROOT (add them to subnodes)
+            child_count = 0
+            for node in root_node.findall("NODE"):
+                self.process_playlist_node(node, subnodes)
+                child_count += 1
+            
+            subnodes.set("COUNT", str(child_count))
+        else:
+            # No ROOT node, create default playlist
+            self.add_default_playlist()
+
+    def add_default_playlist(self):
+        """Create a default collection playlist with all tracks."""
+        root_node = self.add_playlists_section()
+        subnodes = ET.SubElement(root_node, "SUBNODES", COUNT="1")
+        
+        playlist_node = ET.SubElement(subnodes, "NODE", TYPE="PLAYLIST", NAME="collection")
         playlist = ET.SubElement(
             playlist_node, "PLAYLIST",
             ENTRIES=str(len(self.tracks)),
             TYPE="LIST",
             UUID=uuid.uuid4().hex
         )
-
+        
         for track_loc in self.tracks:
             entry = ET.SubElement(playlist, "ENTRY")
             primary_key = ET.SubElement(entry, "PRIMARYKEY", TYPE="TRACK", KEY=track_loc)
@@ -308,15 +424,25 @@ class Rekordbox2Traktor:
         collection = self.add_collection(entries)
 
         self.tracks = []
+        self.track_id_map = {}
 
+        # Process all tracks and build TrackID -> file path mapping
         for track in entries:
+            track_id = get_attribute(track, "TrackID")
             if self.process_track(track, collection):
                 loc = get_location(get_attribute(track, "Location"))
-                self.tracks.append(f"{loc['VOLUME']}{loc['DIR']}{loc['FILE']}")
+                file_path = f"{loc['VOLUME']}{loc['DIR']}{loc['FILE']}"
+                self.tracks.append(file_path)
+                
+                # Map TrackID to file path for playlist processing
+                if track_id:
+                    self.track_id_map[track_id] = file_path
+                
                 self.track_index += 1
 
         self.add_sets()
-        self.add_playlist()
+        # Process playlists from Rekordbox XML
+        self.process_playlists(root)
         self.add_indexing()
 
         tree = ET.ElementTree(self.root)
@@ -326,19 +452,28 @@ class Rekordbox2Traktor:
 if __name__ == "__main__":
     set_conversion("rekordbox", "traktor")
     if len(sys.argv) < 2:
-        print("Usage: python rekord_to_nml.py playlist.rekordbox.xml")
+        print("Usage: python rekord_to_nml.py <input.xml> [output.nml]")
+        print("  input.xml:  Rekordbox XML collection file")
+        print("  output.nml: Optional output NML file (default: input filename with .nml extension)")
+        sys.exit(1)
+    
+    xml_file = sys.argv[1]
+
+    if not exists(xml_file):
+        print(f"Error: Input file '{xml_file}' not found.")
+        print("Usage: python rekord_to_nml.py <input.xml> [output.nml]")
+        sys.exit(1)
+
+    # Use provided output file or generate from input filename
+    if len(sys.argv) >= 3:
+        nml_file = sys.argv[2]
     else:
-        xml_file = sys.argv[1]
-
-        if not exists(xml_file):
-            print("Usage: python rekord_to_nml.py playlist.rekordbox.xml")
-            sys.exit(1)
-
         filepath = xml_file.replace(".xml", "").replace(".rekordbox", "")
         nml_file = f"{filepath}.nml"
-        open(nml_file, "w").close()
+    
+    open(nml_file, "w").close()
 
-        converter = Rekordbox2Traktor()
-        converter.convert_xml_to_nml(xml_file, nml_file)
+    converter = Rekordbox2Traktor()
+    converter.convert_xml_to_nml(xml_file, nml_file)
 
-        print(f"☕️ {xml_file} was converted to {nml_file}!")
+    print(f"{xml_file} was converted to {nml_file}!")

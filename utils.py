@@ -3,7 +3,7 @@ from xml.etree.ElementTree import Element
 from datetime import datetime
 from typing import Literal
 
-from consts import DATE_FORMAT, COLOR_MAP, TONALITY_MAP, COLOR_NAME_TO_RGB, CUE_COLORS, RGB_TO_CUE_TYPE
+from consts import DATE_FORMAT, COLOR_MAP, TONALITY_MAP, COLOR_NAME_TO_RGB, CUE_COLORS, RGB_TO_CUE_TYPE, CAMELOT_WHEEL_MAP
 
 softType = Literal["traktor", "rekordbox"]
 
@@ -88,8 +88,27 @@ def get_cue_type(ctype):
     return "0"
 
 
+def _convert_camelot_to_standard(camelot_key):
+    """Convert Camelot wheel notation (e.g., '7A', '1B') to standard musical key."""
+    if not camelot_key:
+        return ""
+    # Check if it's Camelot format (number + A or B)
+    if len(camelot_key) >= 2 and camelot_key[-1] in ['A', 'B']:
+        return CAMELOT_WHEEL_MAP.get(camelot_key, "")
+    return ""
+
+
 def _get_traktor_key(tonality):
     """Convert Rekordbox tonality to Traktor musical key."""
+    if not tonality:
+        return "0"
+    
+    # First check if it's Camelot wheel notation
+    standard_key = _convert_camelot_to_standard(tonality)
+    if standard_key:
+        tonality = standard_key
+    
+    # Then look up in TONALITY_MAP
     return TONALITY_MAP.get(tonality, "0")
 
 

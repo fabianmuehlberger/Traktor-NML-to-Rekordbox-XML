@@ -137,3 +137,31 @@ CUE_COLORS = {
     "cue4": "sky",
     "AutoGrid": "kaki",
 }
+
+# Camelot Wheel mapping: converts Camelot notation (1A-12A, 1B-12B) to standard musical keys
+CAMELOT_WHEEL_MAP = {
+    "1A": "Ab",
+    "1B": "Bbm",
+    "2A": "Eb",
+    "2B": "Fm",
+    "3A": "Bb",
+    "3B": "Cm",
+    "4A": "F",
+    "4B": "Dm",
+    "5A": "C",
+    "5B": "Am",
+    "6A": "G",
+    "6B": "Em",
+    "7A": "D",
+    "7B": "Bm",
+    "8A": "A",
+    "8B": "Gbm",  # F#m
+    "9A": "E",
+    "9B": "Dbm",  # C#m
+    "10A": "B",
+    "10B": "Abm",  # G#m
+    "11A": "Gb",  # F#
+    "11B": "Ebm",  # D#m
+    "12A": "Db",
+    "12B": "Bbm",
+}
